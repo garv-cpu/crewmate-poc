@@ -6,8 +6,8 @@ import {
   drawVideoToSmallCanvas
 } from "./utils/image";
 import {
-  autoCropDocument,
   clearDocumentOutline,
+  cropDocumentFromPoints,
   detectDocumentInCanvas,
   drawDocumentOutline,
   getDetectionStability
@@ -127,11 +127,10 @@ function startSmartScanner() {
       }
 
       if (stableFrameCountRef.current >= 3) {
-        autoCapturedRef.current = true;
-        setScannerMessage("Stable document detected. Auto capturing...");
-        await handleCaptureAndCrop();
-        stopSmartScanner();
-      }
+  autoCapturedRef.current = true;
+  setScannerMessage("Stable document detected. Auto capturing...");
+  await handleCaptureAndCrop();
+}
     } catch (error) {
       console.error(error);
       setScannerMessage("Scanner is adjusting. Try better light and contrast.");
@@ -163,15 +162,58 @@ function handleStopCamera() {
 
 async function handleCaptureAndCrop() {
   try {
-    setStatus("Capturing document image...");
+    // Important: stop live scanner before manual capture to avoid OpenCV overlap
+    stopSmartScanner();
 
+    setStatus("Capturing document image...");
+    setScannerMessage("Capturing...");
+
+    const video = videoRef.current;
     const rawCanvas = rawCanvasRef.current;
     const croppedCanvas = croppedCanvasRef.current;
+    const detectorCanvas = detectorCanvasRef.current;
 
-    drawVideoToCanvas(videoRef.current, rawCanvas);
+    if (!video || !rawCanvas || !croppedCanvas || !detectorCanvas) {
+      setStatus("Scanner elements missing.");
+      return;
+    }
 
-    setStatus("Detecting document edges and auto-cropping...");
-    const cropResult = await autoCropDocument(rawCanvas, croppedCanvas);
+    // Full-quality capture for final output
+    drawVideoToCanvas(video, rawCanvas);
+
+    // Small canvas only for fast OpenCV detection
+    const detectionMeta = drawVideoToSmallCanvas(video, detectorCanvas, 480);
+
+    setStatus("Detecting document edges...");
+    setScannerMessage("Detecting document edges...");
+
+    const detection = await detectDocumentInCanvas(detectorCanvas);
+
+    if (!detection.found) {
+      const raw = canvasToBase64Jpeg(rawCanvas);
+
+      croppedCanvas.width = rawCanvas.width;
+      croppedCanvas.height = rawCanvas.height;
+      croppedCanvas.getContext("2d").drawImage(rawCanvas, 0, 0);
+
+      setRawBase64(raw);
+      setCroppedBase64(raw);
+
+      setStatus("Manual capture completed, but document edges were not clearly detected. Full image was used.");
+      setScannerMessage("Full image captured. Try better lighting for auto-crop.");
+      return;
+    }
+
+    // Convert small-canvas points back to full-resolution canvas points
+    const fullResPoints = detection.points.map((point) => ({
+      x: point.x / detectionMeta.scale,
+      y: point.y / detectionMeta.scale
+    }));
+
+    setStatus("Cropping document...");
+    setScannerMessage("Cropping document...");
+
+    await cropDocumentFromPoints(rawCanvas, croppedCanvas, fullResPoints);
 
     const raw = canvasToBase64Jpeg(rawCanvas);
     const cropped = canvasToBase64Jpeg(croppedCanvas);
@@ -179,15 +221,12 @@ async function handleCaptureAndCrop() {
     setRawBase64(raw);
     setCroppedBase64(cropped);
 
-    if (cropResult.usedFallback) {
-      setStatus("Document captured, but clear edges were not found. Full frame was used.");
-      setScannerMessage("Auto-crop fallback used. Try again with better lighting if needed.");
-    } else {
-      setStatus("Document auto-captured and cropped successfully.");
-      setScannerMessage("Document captured successfully.");
-    }
+    setStatus("Manual capture completed and document cropped successfully.");
+    setScannerMessage("Document captured successfully.");
   } catch (error) {
-    setStatus(error.message || "Capture/crop failed.");
+    console.error(error);
+    setStatus(error.message || "Manual capture failed.");
+    setScannerMessage("Manual capture failed. Try again.");
   }
 }
 
