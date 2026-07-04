@@ -1,5 +1,3 @@
-import jscanify from "jscanify";
-
 function waitForOpenCV() {
   return new Promise((resolve, reject) => {
     let tries = 0;
@@ -7,27 +5,55 @@ function waitForOpenCV() {
     const timer = setInterval(() => {
       tries += 1;
 
-      if (window.cv && window.cv.Mat) {
+      const cv = window.cv;
+
+      if (
+        cv &&
+        cv.Mat &&
+        cv.imread &&
+        cv.findContours &&
+        cv.getPerspectiveTransform
+      ) {
         clearInterval(timer);
-        resolve(window.cv);
+        resolve(cv);
       }
 
-      if (tries > 100) {
+      if (tries > 150) {
         clearInterval(timer);
-        reject(new Error("OpenCV.js failed to load."));
+        reject(new Error("OpenCV.js failed to load completely."));
       }
     }, 100);
   });
 }
 
-let scannerInstance = null;
-function getScanner() {
-  if (!scannerInstance) {
-    scannerInstance = new jscanify();
-  }
-  return scannerInstance;
+function getJscanifyConstructor() {
+  return (
+    window.jscanify ||
+    window.Jscanify ||
+    globalThis.jscanify ||
+    globalThis.Jscanify
+  );
 }
 
+let scannerInstance = null;
+
+function getScanner() {
+  const Jscanify =
+    window.jscanify ||
+    window.Jscanify ||
+    globalThis.jscanify ||
+    globalThis.Jscanify;
+
+  if (!Jscanify) {
+    throw new Error("jscanify is not loaded. Check /vendor/jscanify.js script in index.html.");
+  }
+
+  if (!scannerInstance) {
+    scannerInstance = new Jscanify();
+  }
+
+  return scannerInstance;
+}
 function polygonArea(points) {
   let area = 0;
   for (let i = 0; i < points.length; i++) {
