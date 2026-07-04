@@ -25,15 +25,23 @@ export async function detectDocumentInCanvas(sourceCanvas) {
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
   const edged = new cv.Mat();
+  const dilated = new cv.Mat();
+  const dilationKernel = cv.Mat.ones(3, 3, cv.CV_8U);
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
 
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-    cv.Canny(blurred, edged, 60, 180);
 
-    cv.findContours(edged, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    // Lower thresholds catch weaker edges (screen glare / low-contrast docs).
+    cv.Canny(blurred, edged, 40, 120);
+
+    // Bridges small gaps in the edge map caused by glare/moiré so
+    // approxPolyDP can still close a clean 4-point polygon.
+    cv.dilate(edged, dilated, dilationKernel);
+
+    cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     let bestContour = null;
     let bestArea = 0;
@@ -51,8 +59,8 @@ export async function detectDocumentInCanvas(sourceCanvas) {
 
       const isDocumentLike =
         approx.rows === 4 &&
-        areaRatio > 0.12 &&
-        areaRatio < 0.92 &&
+        areaRatio > 0.08 &&
+        areaRatio < 0.95 &&
         area > bestArea;
 
       if (isDocumentLike) {
@@ -89,6 +97,8 @@ export async function detectDocumentInCanvas(sourceCanvas) {
     gray.delete();
     blurred.delete();
     edged.delete();
+    dilated.delete();
+    dilationKernel.delete();
     contours.delete();
     hierarchy.delete();
   }
@@ -191,12 +201,14 @@ export function drawDocumentOutline({
     return;
   }
 
-  // Step 1: sourceCanvas (detector canvas) is a downscaled copy of the FULL
-  // camera frame, same aspect ratio. Convert points -> full video-frame space.
+  // sourceCanvas (detector canvas) is a downscaled copy of the FULL camera
+  // frame at the same aspect ratio. Convert points -> full video-frame space.
   const toFullResScale = videoWidth / sourceCanvas.width;
 
-  // Step 2: object-fit: cover uses a UNIFORM scale (the larger of the two
-  // ratios) and centers the overflow, cropping the rest.
+  // video { object-fit: cover } uses a UNIFORM scale (the larger of the two
+  // ratios) and centers the overflow, cropping the rest. Without accounting
+  // for this, points land off-screen or warped whenever the container's
+  // aspect ratio differs from the camera's native aspect ratio.
   const coverScale = Math.max(rect.width / videoWidth, rect.height / videoHeight);
   const displayedWidth = videoWidth * coverScale;
   const displayedHeight = videoHeight * coverScale;

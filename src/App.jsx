@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { startCamera, stopCamera } from "./utils/camera";
 import {
   canvasToBase64Jpeg,
-  drawVideoToCanvas,
+  drawVideoToSizedCanvas,
   drawVideoToSmallCanvas
 } from "./utils/image";
 import {
@@ -88,7 +88,7 @@ function startSmartScanner() {
       if (!video || !detectorCanvas || !overlayCanvas) return;
       if (!video.videoWidth || !video.videoHeight) return;
 
-      drawVideoToSmallCanvas(video, detectorCanvas, 720);
+      drawVideoToSmallCanvas(video, detectorCanvas, 420);
 
       const detection = await detectDocumentInCanvas(detectorCanvas);
 
@@ -162,7 +162,6 @@ function handleStopCamera() {
 
 async function handleCaptureAndCrop() {
   try {
-    // Important: stop live scanner before manual capture to avoid OpenCV overlap
     stopSmartScanner();
 
     setStatus("Capturing document image...");
@@ -175,45 +174,72 @@ async function handleCaptureAndCrop() {
 
     if (!video || !rawCanvas || !croppedCanvas || !detectorCanvas) {
       setStatus("Scanner elements missing.");
+      setScannerMessage("Scanner elements missing.");
       return;
     }
 
-    // Full-quality capture for final output
-    drawVideoToCanvas(video, rawCanvas);
+    if (!video.videoWidth || !video.videoHeight) {
+      setStatus("Camera is not ready yet.");
+      setScannerMessage("Camera is not ready yet.");
+      return;
+    }
 
-    // Small canvas only for fast OpenCV detection
-    const detectionMeta = drawVideoToSmallCanvas(video, detectorCanvas, 480);
+    /*
+      IMPORTANT:
+      Do NOT capture full mobile camera resolution for manual crop.
+      Full-res OpenCV on mobile can freeze the page.
+      We capture a medium 900px canvas for final POC output.
+    */
+    const outputMeta = drawVideoToSizedCanvas(video, rawCanvas, 900);
+
+    /*
+      Detection happens on an even smaller canvas.
+      This keeps OpenCV fast.
+    */
+    const detectionMeta = drawVideoToSmallCanvas(video, detectorCanvas, 420);
 
     setStatus("Detecting document edges...");
     setScannerMessage("Detecting document edges...");
 
+    await waitForBrowserPaint();
+
     const detection = await detectDocumentInCanvas(detectorCanvas);
 
     if (!detection.found) {
-      const raw = canvasToBase64Jpeg(rawCanvas);
-
       croppedCanvas.width = rawCanvas.width;
       croppedCanvas.height = rawCanvas.height;
-      croppedCanvas.getContext("2d").drawImage(rawCanvas, 0, 0);
+
+      const ctx = croppedCanvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(rawCanvas, 0, 0);
+
+      const raw = canvasToBase64Jpeg(rawCanvas);
+      const cropped = canvasToBase64Jpeg(croppedCanvas);
 
       setRawBase64(raw);
-      setCroppedBase64(raw);
+      setCroppedBase64(cropped);
 
       setStatus("Manual capture completed, but document edges were not clearly detected. Full image was used.");
       setScannerMessage("Full image captured. Try better lighting for auto-crop.");
       return;
     }
 
-    // Convert small-canvas points back to full-resolution canvas points
-    const fullResPoints = detection.points.map((point) => ({
-      x: point.x / detectionMeta.scale,
-      y: point.y / detectionMeta.scale
+    /*
+      Convert detector-canvas points to output-canvas points.
+      detectorCanvas scale and rawCanvas scale are different.
+    */
+    const pointScale = outputMeta.scale / detectionMeta.scale;
+
+    const outputPoints = detection.points.map((point) => ({
+      x: point.x * pointScale,
+      y: point.y * pointScale
     }));
 
     setStatus("Cropping document...");
     setScannerMessage("Cropping document...");
 
-    await cropDocumentFromPoints(rawCanvas, croppedCanvas, fullResPoints);
+    await waitForBrowserPaint();
+
+    await cropDocumentFromPoints(rawCanvas, croppedCanvas, outputPoints);
 
     const raw = canvasToBase64Jpeg(rawCanvas);
     const cropped = canvasToBase64Jpeg(croppedCanvas);
@@ -228,6 +254,14 @@ async function handleCaptureAndCrop() {
     setStatus(error.message || "Manual capture failed.");
     setScannerMessage("Manual capture failed. Try again.");
   }
+}
+
+function waitForBrowserPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resolve);
+    });
+  });
 }
 
   async function handleRunDocumentAI() {

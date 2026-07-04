@@ -46,7 +46,36 @@ export function drawVideoToSmallCanvas(videoElement, canvasElement, maxWidth = 7
   };
 }
 
-export function canvasToBase64Jpeg(canvasElement) {
-  const dataUrl = canvasElement.toDataURL("image/jpeg", 0.92);
+export function drawVideoToSizedCanvas(videoElement, canvasElement, maxWidth = 900) {
+  if (!videoElement || !canvasElement) {
+    throw new Error("Video or canvas element missing.");
+  }
+
+  const videoWidth = videoElement.videoWidth;
+  const videoHeight = videoElement.videoHeight;
+
+  if (!videoWidth || !videoHeight) {
+    throw new Error("Camera is not ready yet.");
+  }
+
+  const scale = Math.min(1, maxWidth / videoWidth);
+  const targetWidth = Math.round(videoWidth * scale);
+  const targetHeight = Math.round(videoHeight * scale);
+
+  canvasElement.width = targetWidth;
+  canvasElement.height = targetHeight;
+
+  const ctx = canvasElement.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(videoElement, 0, 0, targetWidth, targetHeight);
+
+  return {
+    scale,
+    width: targetWidth,
+    height: targetHeight
+  };
+}
+
+export function canvasToBase64Jpeg(canvasElement, quality = 0.86) {
+  const dataUrl = canvasElement.toDataURL("image/jpeg", quality);
   return dataUrl.split(",")[1];
 }
