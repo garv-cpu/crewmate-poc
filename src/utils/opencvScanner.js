@@ -178,6 +178,8 @@ export function drawDocumentOutline({
   if (!overlayCanvas || !videoElement || !sourceCanvas) return;
 
   const rect = videoElement.getBoundingClientRect();
+  const videoWidth = videoElement.videoWidth;
+  const videoHeight = videoElement.videoHeight;
 
   overlayCanvas.width = rect.width;
   overlayCanvas.height = rect.height;
@@ -185,16 +187,25 @@ export function drawDocumentOutline({
   const ctx = overlayCanvas.getContext("2d");
   ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-  if (!visible || !points?.length) {
+  if (!visible || !points?.length || !videoWidth || !videoHeight) {
     return;
   }
 
-  const scaleX = overlayCanvas.width / sourceCanvas.width;
-  const scaleY = overlayCanvas.height / sourceCanvas.height;
+  // Step 1: sourceCanvas (detector canvas) is a downscaled copy of the FULL
+  // camera frame, same aspect ratio. Convert points -> full video-frame space.
+  const toFullResScale = videoWidth / sourceCanvas.width;
+
+  // Step 2: object-fit: cover uses a UNIFORM scale (the larger of the two
+  // ratios) and centers the overflow, cropping the rest.
+  const coverScale = Math.max(rect.width / videoWidth, rect.height / videoHeight);
+  const displayedWidth = videoWidth * coverScale;
+  const displayedHeight = videoHeight * coverScale;
+  const offsetX = (displayedWidth - rect.width) / 2;
+  const offsetY = (displayedHeight - rect.height) / 2;
 
   const scaled = points.map((point) => ({
-    x: point.x * scaleX,
-    y: point.y * scaleY
+    x: point.x * toFullResScale * coverScale - offsetX,
+    y: point.y * toFullResScale * coverScale - offsetY
   }));
 
   ctx.save();
