@@ -1,6 +1,10 @@
 import { useRef, useState } from "react";
 import { startCamera, stopCamera } from "./utils/camera";
-import { canvasToBase64Jpeg, drawVideoToCanvas } from "./utils/image";
+import {
+  canvasToBase64Jpeg,
+  drawVideoToCanvas,
+  drawVideoToSmallCanvas
+} from "./utils/image";
 import {
   autoCropDocument,
   clearDocumentOutline,
@@ -36,16 +40,18 @@ export default function App() {
   const previousPointsRef = useRef(null);
   const stableFrameCountRef = useRef(0);
   const autoCapturedRef = useRef(false);
-
+const scanRunningRef = useRef(false);
+const lastDetectionTimeRef = useRef(0);
   const [scannerMessage, setScannerMessage] = useState("Point camera at the document.");
   const [documentDetected, setDocumentDetected] = useState(false);
 
-  function stopSmartScanner() {
+function stopSmartScanner() {
   if (scanTimerRef.current) {
-    clearInterval(scanTimerRef.current);
+    cancelAnimationFrame(scanTimerRef.current);
     scanTimerRef.current = null;
   }
 
+  scanRunningRef.current = false;
   clearDocumentOutline(overlayCanvasRef.current);
   previousPointsRef.current = null;
   stableFrameCountRef.current = 0;
@@ -56,9 +62,24 @@ function startSmartScanner() {
   stopSmartScanner();
 
   autoCapturedRef.current = false;
+  scanRunningRef.current = false;
+  lastDetectionTimeRef.current = 0;
   setScannerMessage("Searching for document...");
 
-  scanTimerRef.current = setInterval(async () => {
+  scanTimerRef.current = requestAnimationFrame(async function scanLoop(now) {
+    if (autoCapturedRef.current) return;
+
+    scanTimerRef.current = requestAnimationFrame(scanLoop);
+
+    const shouldScanNow = now - lastDetectionTimeRef.current > 700;
+
+    if (!shouldScanNow || scanRunningRef.current) {
+      return;
+    }
+
+    scanRunningRef.current = true;
+    lastDetectionTimeRef.current = now;
+
     try {
       const video = videoRef.current;
       const detectorCanvas = detectorCanvasRef.current;
@@ -66,9 +87,8 @@ function startSmartScanner() {
 
       if (!video || !detectorCanvas || !overlayCanvas) return;
       if (!video.videoWidth || !video.videoHeight) return;
-      if (autoCapturedRef.current) return;
 
-      drawVideoToCanvas(video, detectorCanvas);
+      drawVideoToSmallCanvas(video, detectorCanvas, 720);
 
       const detection = await detectDocumentInCanvas(detectorCanvas);
 
@@ -82,6 +102,7 @@ function startSmartScanner() {
       }
 
       setDocumentDetected(true);
+
       drawDocumentOutline({
         overlayCanvas,
         videoElement: video,
@@ -105,7 +126,7 @@ function startSmartScanner() {
         setScannerMessage("Document detected. Keep it steady.");
       }
 
-      if (stableFrameCountRef.current >= 5) {
+      if (stableFrameCountRef.current >= 3) {
         autoCapturedRef.current = true;
         setScannerMessage("Stable document detected. Auto capturing...");
         await handleCaptureAndCrop();
@@ -114,9 +135,12 @@ function startSmartScanner() {
     } catch (error) {
       console.error(error);
       setScannerMessage("Scanner is adjusting. Try better light and contrast.");
+    } finally {
+      scanRunningRef.current = false;
     }
-  }, 350);
+  });
 }
+
 async function handleStartCamera() {
   try {
     setStatus("Requesting camera permission...");
@@ -239,34 +263,34 @@ async function handleCaptureAndCrop() {
       </section>
 
       <section className="grid">
-        <div className="panel">
-          <h2>1. Camera Scanner</h2>
-          <p className="muted">
-            This web POC uses browser camera + OpenCV.js. Native app later can use ML Kit on Android
-            and VisionKit on iOS.
-          </p>
+      <div className="panel scanner-panel">
+  <h2>1. Camera Scanner</h2>
+  <p className="muted">
+    This web POC uses browser camera + OpenCV.js. Native app later can use ML Kit on Android
+    and VisionKit on iOS.
+  </p>
 
-         <div className={`video-frame ${documentDetected ? "document-found" : ""}`}>
-  <video ref={videoRef} autoPlay playsInline muted />
-  <canvas ref={overlayCanvasRef} className="smart-overlay-canvas" />
+  <div className={`video-frame ${documentDetected ? "document-found" : ""}`}>
+    <video ref={videoRef} autoPlay playsInline muted />
+    <canvas ref={overlayCanvasRef} className="smart-overlay-canvas" />
 
-  <div className="scanner-message">
-    {scannerMessage}
+    <div className="scanner-message">
+      {scannerMessage}
+    </div>
+  </div>
+
+  <div className="button-row scanner-actions">
+    {!cameraActive ? (
+      <button onClick={handleStartCamera}>Allow Camera</button>
+    ) : (
+      <button onClick={handleStopCamera} className="secondary">Stop Camera</button>
+    )}
+
+    <button onClick={handleCaptureAndCrop} disabled={!cameraActive}>
+      Manual Capture
+    </button>
   </div>
 </div>
-
-          <div className="button-row">
-            {!cameraActive ? (
-              <button onClick={handleStartCamera}>Allow Camera</button>
-            ) : (
-              <button onClick={handleStopCamera} className="secondary">Stop Camera</button>
-            )}
-
-            <button onClick={handleCaptureAndCrop} disabled={!cameraActive}>
-              Capture + Auto Crop
-            </button>
-          </div>
-        </div>
 
         <div className="panel">
           <h2>2. Cropped Document</h2>
