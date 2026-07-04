@@ -1,3 +1,5 @@
+import jscanify from "jscanify";
+
 function waitForOpenCV() {
   return new Promise((resolve, reject) => {
     let tries = 0;
@@ -18,89 +20,72 @@ function waitForOpenCV() {
   });
 }
 
+let scannerInstance = null;
+function getScanner() {
+  if (!scannerInstance) {
+    scannerInstance = new jscanify();
+  }
+  return scannerInstance;
+}
+
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length;
+    area += points[i].x * points[j].y;
+    area -= points[j].x * points[i].y;
+  }
+  return Math.abs(area / 2);
+}
+
 export async function detectDocumentInCanvas(sourceCanvas) {
   const cv = await waitForOpenCV();
+  const scanner = getScanner();
 
-  const src = cv.imread(sourceCanvas);
-  const gray = new cv.Mat();
-  const blurred = new cv.Mat();
-  const edged = new cv.Mat();
-  const dilated = new cv.Mat();
-  const dilationKernel = cv.Mat.ones(3, 3, cv.CV_8U);
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
+  const mat = cv.imread(sourceCanvas);
+  let contour = null;
 
   try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    contour = scanner.findPaperContour(mat);
 
-    // Lower thresholds catch weaker edges (screen glare / low-contrast docs).
-    cv.Canny(blurred, edged, 40, 120);
+    if (!contour) {
+      return { found: false, points: [], areaRatio: 0 };
+    }
 
-    // Bridges small gaps in the edge map caused by glare/moiré so
-    // approxPolyDP can still close a clean 4-point polygon.
-    cv.dilate(edged, dilated, dilationKernel);
+    const corners = scanner.getCornerPoints(contour, mat);
 
-    cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    if (
+      !corners ||
+      !corners.topLeftCorner ||
+      !corners.topRightCorner ||
+      !corners.bottomLeftCorner ||
+      !corners.bottomRightCorner
+    ) {
+      return { found: false, points: [], areaRatio: 0 };
+    }
 
-    let bestContour = null;
-    let bestArea = 0;
+    // Match this project's existing point order convention: TL, TR, BR, BL
+    const points = [
+      corners.topLeftCorner,
+      corners.topRightCorner,
+      corners.bottomRightCorner,
+      corners.bottomLeftCorner
+    ];
+
     const imageArea = sourceCanvas.width * sourceCanvas.height;
+    const area = polygonArea(points);
+    const areaRatio = area / imageArea;
 
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-      const perimeter = cv.arcLength(contour, true);
-      const approx = new cv.Mat();
-
-      cv.approxPolyDP(contour, approx, 0.02 * perimeter, true);
-
-      const area = cv.contourArea(approx);
-      const areaRatio = area / imageArea;
-
-      const isDocumentLike =
-        approx.rows === 4 &&
-        areaRatio > 0.08 &&
-        areaRatio < 0.95 &&
-        area > bestArea;
-
-      if (isDocumentLike) {
-        if (bestContour) bestContour.delete();
-        bestContour = approx;
-        bestArea = area;
-      } else {
-        approx.delete();
-      }
-
-      contour.delete();
+    // Guard against jscanify locking onto something absurdly small/large
+    // (e.g. a shadow sliver or the whole frame edge-to-edge).
+    if (areaRatio < 0.05 || areaRatio > 0.98) {
+      return { found: false, points: [], areaRatio: 0 };
     }
 
-    if (!bestContour) {
-      return {
-        found: false,
-        points: [],
-        areaRatio: 0
-      };
-    }
-
-    const points = getContourPoints(bestContour);
-    const ordered = orderPoints(points);
-
-    bestContour.delete();
-
-    return {
-      found: true,
-      points: ordered,
-      areaRatio: bestArea / imageArea
-    };
+    return { found: true, points, areaRatio };
   } finally {
-    src.delete();
-    gray.delete();
-    blurred.delete();
-    edged.delete();
-    dilated.delete();
-    dilationKernel.delete();
-    contours.delete();
-    hierarchy.delete();
+    mat.delete();
+    if (contour) contour.delete();
   }
 }
 
@@ -318,19 +303,6 @@ function drawFallback(sourceCanvas, targetCanvas) {
 
   const ctx = targetCanvas.getContext("2d");
   ctx.drawImage(sourceCanvas, 0, 0);
-}
-
-function getContourPoints(contour) {
-  const points = [];
-
-  for (let i = 0; i < contour.data32S.length; i += 2) {
-    points.push({
-      x: contour.data32S[i],
-      y: contour.data32S[i + 1]
-    });
-  }
-
-  return points;
 }
 
 function orderPoints(points) {
