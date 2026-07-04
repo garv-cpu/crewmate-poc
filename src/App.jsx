@@ -1,7 +1,13 @@
 import { useRef, useState } from "react";
 import { startCamera, stopCamera } from "./utils/camera";
 import { canvasToBase64Jpeg, drawVideoToCanvas } from "./utils/image";
-import { autoCropDocument } from "./utils/opencvScanner";
+import {
+  autoCropDocument,
+  clearDocumentOutline,
+  detectDocumentInCanvas,
+  drawDocumentOutline,
+  getDetectionStability
+} from "./utils/opencvScanner";
 import { processWithDocumentAI } from "./utils/documentAi";
 import { classifyDocument, validateExtractedFields } from "./utils/validators";
 import { runLLMExceptionReview } from "./utils/llmReview";
@@ -24,51 +30,142 @@ export default function App() {
   const [classification, setClassification] = useState(null);
   const [validation, setValidation] = useState(null);
   const [llmReview, setLlmReview] = useState(null);
+  const overlayCanvasRef = useRef(null);
+  const detectorCanvasRef = useRef(null);
+  const scanTimerRef = useRef(null);
+  const previousPointsRef = useRef(null);
+  const stableFrameCountRef = useRef(0);
+  const autoCapturedRef = useRef(false);
 
-  async function handleStartCamera() {
-    try {
-      setStatus("Requesting camera permission...");
-      await startCamera(videoRef.current);
-      setCameraActive(true);
-      setStatus("Camera started. Place CDC/SRB document inside the frame.");
-    } catch (error) {
-      setStatus(error.message || "Camera failed.");
-    }
+  const [scannerMessage, setScannerMessage] = useState("Point camera at the document.");
+  const [documentDetected, setDocumentDetected] = useState(false);
+
+  function stopSmartScanner() {
+  if (scanTimerRef.current) {
+    clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
   }
 
-  function handleStopCamera() {
-    stopCamera(videoRef.current);
-    setCameraActive(false);
-    setStatus("Camera stopped.");
-  }
+  clearDocumentOutline(overlayCanvasRef.current);
+  previousPointsRef.current = null;
+  stableFrameCountRef.current = 0;
+  setDocumentDetected(false);
+}
 
-  async function handleCaptureAndCrop() {
+function startSmartScanner() {
+  stopSmartScanner();
+
+  autoCapturedRef.current = false;
+  setScannerMessage("Searching for document...");
+
+  scanTimerRef.current = setInterval(async () => {
     try {
-      setStatus("Capturing document image...");
+      const video = videoRef.current;
+      const detectorCanvas = detectorCanvasRef.current;
+      const overlayCanvas = overlayCanvasRef.current;
 
-      const rawCanvas = rawCanvasRef.current;
-      const croppedCanvas = croppedCanvasRef.current;
+      if (!video || !detectorCanvas || !overlayCanvas) return;
+      if (!video.videoWidth || !video.videoHeight) return;
+      if (autoCapturedRef.current) return;
 
-      drawVideoToCanvas(videoRef.current, rawCanvas);
+      drawVideoToCanvas(video, detectorCanvas);
 
-      setStatus("Detecting document edges and auto-cropping...");
-      const cropResult = await autoCropDocument(rawCanvas, croppedCanvas);
+      const detection = await detectDocumentInCanvas(detectorCanvas);
 
-      const raw = canvasToBase64Jpeg(rawCanvas);
-      const cropped = canvasToBase64Jpeg(croppedCanvas);
+      if (!detection.found) {
+        stableFrameCountRef.current = 0;
+        previousPointsRef.current = null;
+        setDocumentDetected(false);
+        setScannerMessage("Move closer and keep the full document visible.");
+        clearDocumentOutline(overlayCanvas);
+        return;
+      }
 
-      setRawBase64(raw);
-      setCroppedBase64(cropped);
+      setDocumentDetected(true);
+      drawDocumentOutline({
+        overlayCanvas,
+        videoElement: video,
+        sourceCanvas: detectorCanvas,
+        points: detection.points,
+        visible: true
+      });
 
-      if (cropResult.usedFallback) {
-        setStatus("Document captured. Auto-crop fallback used because clear edges were not found.");
+      const stability = getDetectionStability(
+        detection.points,
+        previousPointsRef.current
+      );
+
+      previousPointsRef.current = detection.points;
+
+      if (stability >= 0.7) {
+        stableFrameCountRef.current += 1;
+        setScannerMessage("Document detected. Hold steady...");
       } else {
-        setStatus("Document captured and auto-cropped successfully.");
+        stableFrameCountRef.current = 0;
+        setScannerMessage("Document detected. Keep it steady.");
+      }
+
+      if (stableFrameCountRef.current >= 5) {
+        autoCapturedRef.current = true;
+        setScannerMessage("Stable document detected. Auto capturing...");
+        await handleCaptureAndCrop();
+        stopSmartScanner();
       }
     } catch (error) {
-      setStatus(error.message || "Capture/crop failed.");
+      console.error(error);
+      setScannerMessage("Scanner is adjusting. Try better light and contrast.");
     }
+  }, 350);
+}
+async function handleStartCamera() {
+  try {
+    setStatus("Requesting camera permission...");
+    await startCamera(videoRef.current);
+    setCameraActive(true);
+    setStatus("Camera started. Place CDC/SRB document inside the frame.");
+    startSmartScanner();
+  } catch (error) {
+    setStatus(error.message || "Camera failed.");
   }
+}
+
+function handleStopCamera() {
+  stopSmartScanner();
+  stopCamera(videoRef.current);
+  setCameraActive(false);
+  setScannerMessage("Point camera at the document.");
+  setStatus("Camera stopped.");
+}
+
+async function handleCaptureAndCrop() {
+  try {
+    setStatus("Capturing document image...");
+
+    const rawCanvas = rawCanvasRef.current;
+    const croppedCanvas = croppedCanvasRef.current;
+
+    drawVideoToCanvas(videoRef.current, rawCanvas);
+
+    setStatus("Detecting document edges and auto-cropping...");
+    const cropResult = await autoCropDocument(rawCanvas, croppedCanvas);
+
+    const raw = canvasToBase64Jpeg(rawCanvas);
+    const cropped = canvasToBase64Jpeg(croppedCanvas);
+
+    setRawBase64(raw);
+    setCroppedBase64(cropped);
+
+    if (cropResult.usedFallback) {
+      setStatus("Document captured, but clear edges were not found. Full frame was used.");
+      setScannerMessage("Auto-crop fallback used. Try again with better lighting if needed.");
+    } else {
+      setStatus("Document auto-captured and cropped successfully.");
+      setScannerMessage("Document captured successfully.");
+    }
+  } catch (error) {
+    setStatus(error.message || "Capture/crop failed.");
+  }
+}
 
   async function handleRunDocumentAI() {
     try {
@@ -149,15 +246,14 @@ export default function App() {
             and VisionKit on iOS.
           </p>
 
-          <div className="video-frame">
-            <video ref={videoRef} autoPlay playsInline muted />
-            <div className="scan-overlay">
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
-          </div>
+         <div className={`video-frame ${documentDetected ? "document-found" : ""}`}>
+  <video ref={videoRef} autoPlay playsInline muted />
+  <canvas ref={overlayCanvasRef} className="smart-overlay-canvas" />
+
+  <div className="scanner-message">
+    {scannerMessage}
+  </div>
+</div>
 
           <div className="button-row">
             {!cameraActive ? (
@@ -179,9 +275,10 @@ export default function App() {
           </p>
 
           <div className="canvas-stack">
-            <canvas ref={rawCanvasRef} className="hidden-canvas" />
-            <canvas ref={croppedCanvasRef} className="preview-canvas" />
-          </div>
+  <canvas ref={detectorCanvasRef} className="hidden-canvas" />
+  <canvas ref={rawCanvasRef} className="hidden-canvas" />
+  <canvas ref={croppedCanvasRef} className="preview-canvas" />
+</div>
         </div>
       </section>
 
